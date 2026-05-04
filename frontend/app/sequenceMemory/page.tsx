@@ -17,10 +17,13 @@ import React, { useCallback, useEffect, useReducer, useRef, useState } from 'rea
 type GamePhase = 'idle' | 'showing' | 'input' | 'result'
 
 interface GameResult {
+  gameId: string
   playerId: string
   sessionId: string
   gameName: string
   score: number
+  accuracy: number
+  reactionTimesMs: number[]
   startedAt: string
   endedAt: string
   durationMs: number
@@ -30,6 +33,8 @@ interface GameResult {
     gridSize: number
     sequences: number[][]
     mistakes: number
+    correctClicks: number
+    totalClicks: number
   }
 }
 
@@ -46,7 +51,27 @@ type CheckResult = 'correct' | 'complete' | 'wrong'
 // ════════════════════════════════════════════════════════════
 
 function appendRandomCell(sequence: number[]): number[] {
-  const nextCell = Math.floor(Math.random() * 9)
+  let nextCell = Math.floor(Math.random() * 9)
+
+  while (true) {
+    const lastCell = sequence[sequence.length - 1]
+    const twoBackCell = sequence[sequence.length - 2]
+
+    // ห้ามซ้ำติดกัน เช่น 1,1
+    if (sequence.length >= 1 && nextCell === lastCell) {
+      nextCell = Math.floor(Math.random() * 9)
+      continue
+    }
+
+    // ห้าม pattern ง่ายเกินไป เช่น 1,2,1
+    if (sequence.length >= 2 && nextCell === twoBackCell) {
+      nextCell = Math.floor(Math.random() * 9)
+      continue
+    }
+
+    break
+  }
+
   return [...sequence, nextCell]
 }
 
@@ -76,6 +101,10 @@ function buildGameResult({
   endedAt,
   startIso,
   sequences,
+  mistakes,
+  correctClicks,
+  totalClicks,
+  reactionTimesMs,
 }: {
   playerId: string
   sessionId: string
@@ -84,14 +113,22 @@ function buildGameResult({
   endedAt: number
   startIso: string
   sequences: number[][]
+  mistakes: number
+  correctClicks: number
+  totalClicks: number
+  reactionTimesMs: number[]
 }): GameResult {
   const passedLevel = Math.max(level - 1, 0)
+  const accuracy = totalClicks > 0 ? Math.round((correctClicks / totalClicks) * 100) : 0
 
   return {
+    gameId: 'sequence-memory',
     playerId,
     sessionId,
     gameName: 'Sequence Memory Test',
     score: passedLevel * 10,
+    accuracy,
+    reactionTimesMs,
     startedAt: startIso,
     endedAt: new Date().toISOString(),
     durationMs: Math.round(endedAt - startedAt),
@@ -100,7 +137,9 @@ function buildGameResult({
       totalSequence: sequences.length,
       gridSize: 9,
       sequences,
-      mistakes: 1,
+      mistakes,
+      correctClicks,
+      totalClicks,
     },
   }
 }
@@ -311,7 +350,7 @@ const wrap: React.CSSProperties = {
   justifyContent: 'center',
   padding: '1.5rem 1rem',
   gap: '1.5rem',
-  background: '#3b8fd4',
+  background: '#9bd8a5',
   fontFamily: FONT,
   color: 'white',
 }
@@ -356,6 +395,12 @@ export default function SequenceMemory({
   const seqRef = useRef<number[]>([])
   const seqsRef = useRef<number[][]>([])
 
+  const inputStartRef = useRef<number>(0)
+  const mistakesRef = useRef<number>(0)
+  const correctClicksRef = useRef<number>(0)
+  const totalClicksRef = useRef<number>(0)
+  const reactionTimesRef = useRef<number[]>([])
+
   useEffect(() => {
     inputRef.current = state.playerInput
   }, [state.playerInput])
@@ -371,6 +416,13 @@ export default function SequenceMemory({
   const handleStart = () => {
     startPerfRef.current = performance.now()
     startIsoRef.current = new Date().toISOString()
+
+    inputStartRef.current = 0
+    mistakesRef.current = 0
+    correctClicksRef.current = 0
+    totalClicksRef.current = 0
+    reactionTimesRef.current = []
+
     setFail(null)
     setCor(null)
     setLit(null)
@@ -403,6 +455,7 @@ export default function SequenceMemory({
       await sleep(400)
 
       if (!cancelled) {
+        inputStartRef.current = performance.now()
         dispatch({ type: 'BEGIN_INPUT' })
       }
     }
@@ -419,9 +472,18 @@ export default function SequenceMemory({
     (cellIndex: number) => {
       if (state.phase !== 'input') return
 
+      totalClicksRef.current += 1
+
+      if (inputStartRef.current > 0) {
+        reactionTimesRef.current.push(
+          Math.round(performance.now() - inputStartRef.current)
+        )
+      }
+
       const result = checkInput(seqRef.current, inputRef.current, cellIndex)
 
       if (result === 'wrong') {
+        mistakesRef.current += 1
         setFail(cellIndex)
 
         setTimeout(() => {
@@ -436,6 +498,10 @@ export default function SequenceMemory({
             endedAt: performance.now(),
             startIso: startIsoRef.current,
             sequences: [...seqsRef.current, seqRef.current],
+            mistakes: mistakesRef.current,
+            correctClicks: correctClicksRef.current,
+            totalClicks: totalClicksRef.current,
+            reactionTimesMs: reactionTimesRef.current,
           })
 
           onGameComplete(gameResult)
@@ -443,6 +509,8 @@ export default function SequenceMemory({
 
         return
       }
+
+      correctClicksRef.current += 1
 
       setCor(cellIndex)
       setTimeout(() => setCor(null), 180)
@@ -479,14 +547,14 @@ export default function SequenceMemory({
   }
 
   if (state.phase === 'result') {
-    const passed = state.level - 1
+    const passed = Math.max(state.level - 1, 0)
 
     return (
       <div style={wrap}>
         <SquareIcon />
         <h2 style={{ fontSize: 22, fontWeight: 500 }}>You reached level</h2>
         <div style={{ fontSize: 88, fontWeight: 700, lineHeight: 1 }}>
-          {state.level}
+          {passed}
         </div>
         <p
           style={{
@@ -536,4 +604,3 @@ export default function SequenceMemory({
     </div>
   )
 }
-
