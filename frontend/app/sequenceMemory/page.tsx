@@ -3,6 +3,66 @@
 import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 
 type GamePhase = 'idle' | 'showing' | 'input' | 'result'
+type GridSize = 9 | 16 | 25
+
+type LevelRule = {
+  fromLevel: number
+  toLevel?: number
+  maxSameCellStreak: number
+  pairsPerBlock: number
+  blockSize: number
+  minGapBetweenPairs: number
+  maxStraightRun: number
+  pairStartOffset: number
+  localClusterWindow: number
+  maxLocalClusterSpan: number
+}
+
+type SequenceConfig = {
+  maxLevel: number
+  defaultGridSize: GridSize
+  flashOnMs: number
+  flashOffMs: number
+  beforeShowMs: number
+  afterShowMs: number
+  nextLevelDelayMs: number
+  levelRules: LevelRule[]
+}
+
+const GAME_CONFIG: SequenceConfig = {
+  maxLevel: Number.POSITIVE_INFINITY,
+  defaultGridSize: 9,
+  flashOnMs: 400,
+  flashOffMs: 200,
+  beforeShowMs: 600,
+  afterShowMs: 400,
+  nextLevelDelayMs: 800,
+  levelRules: [
+    {
+      fromLevel: 1,
+      toLevel: 10,
+      maxSameCellStreak: 2,
+      pairsPerBlock: 2,
+      blockSize: 10,
+      minGapBetweenPairs: 3,
+      maxStraightRun: 2,
+      pairStartOffset: 4,
+      localClusterWindow: 4,
+      maxLocalClusterSpan: 2,
+    },
+    {
+      fromLevel: 11,
+      maxSameCellStreak: 2,
+      pairsPerBlock: 2,
+      blockSize: 10,
+      minGapBetweenPairs: 3,
+      maxStraightRun: 2,
+      pairStartOffset: 4,
+      localClusterWindow: 4,
+      maxLocalClusterSpan: 2,
+    },
+  ],
+}
 
 interface GameResult {
   gameId: string
@@ -24,6 +84,12 @@ interface GameResult {
     correctClicks: number
     totalClicks: number
     speedLevel: number
+    maxSameCellStreak: number
+    pairsPerBlock: number
+    blockSize: number
+    maxStraightRun: number
+    localClusterWindow: number
+    maxLocalClusterSpan: number
   }
 }
 
@@ -35,27 +101,200 @@ interface GameProps {
 
 type CheckResult = 'correct' | 'complete' | 'wrong'
 
-function appendRandomCell(sequence: number[]): number[] {
-  let nextCell = Math.floor(Math.random() * 9)
+const GRID_OPTIONS: GridSize[] = [9, 16, 25]
 
-  while (true) {
-    const lastCell = sequence[sequence.length - 1]
-    const twoBackCell = sequence[sequence.length - 2]
+function getGridColumns(gridSize: number): number {
+  return Math.sqrt(gridSize)
+}
 
-    if (sequence.length >= 1 && nextCell === lastCell) {
-      nextCell = Math.floor(Math.random() * 9)
-      continue
-    }
+function getRuleForLevel(level: number): LevelRule {
+  return (
+    GAME_CONFIG.levelRules.find((rule) => {
+      const toLevel = rule.toLevel ?? Number.POSITIVE_INFINITY
+      return level >= rule.fromLevel && level <= toLevel
+    }) ?? GAME_CONFIG.levelRules[GAME_CONFIG.levelRules.length - 1]
+  )
+}
 
-    if (sequence.length >= 2 && nextCell === twoBackCell) {
-      nextCell = Math.floor(Math.random() * 9)
-      continue
-    }
+function randomInt(max: number): number {
+  return Math.floor(Math.random() * max)
+}
 
-    break
+function shuffleNumbers(numbers: number[]): number[] {
+  const result = [...numbers]
+
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = randomInt(i + 1)
+    const temp = result[i]
+    result[i] = result[j]
+    result[j] = temp
   }
 
-  return [...sequence, nextCell]
+  return result
+}
+
+function createSeed(): number {
+  return Math.floor(Math.random() * 1_000_000_000)
+}
+
+function seededRandom(seed: number): () => number {
+  let value = seed || 1
+
+  return () => {
+    value = (value * 1664525 + 1013904223) % 4294967296
+    return value / 4294967296
+  }
+}
+
+function shuffleNumbersWithRandom(numbers: number[], rand: () => number): number[] {
+  const result = [...numbers]
+
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1))
+    const temp = result[i]
+    result[i] = result[j]
+    result[j] = temp
+  }
+
+  return result
+}
+
+function getPairLevelsForBlock(seed: number, blockIndex: number, rule: LevelRule): number[] {
+  const blockStartLevel = blockIndex * rule.blockSize + 1
+  const blockEndLevel = blockStartLevel + rule.blockSize - 1
+  const minPairLevel = blockStartLevel + Math.max(rule.pairStartOffset - 1, 1)
+  const rand = seededRandom(seed + blockIndex * 9973 + rule.blockSize * 313)
+  const possibleLevels = []
+
+  for (let level = minPairLevel; level <= blockEndLevel; level++) {
+    possibleLevels.push(level)
+  }
+
+  const shuffled = shuffleNumbersWithRandom(possibleLevels, rand)
+  const selected: number[] = []
+
+  for (const level of shuffled) {
+    const tooClose = selected.some((chosen) => Math.abs(chosen - level) <= rule.minGapBetweenPairs)
+    if (!tooClose) selected.push(level)
+    if (selected.length >= rule.pairsPerBlock) break
+  }
+
+  return selected.sort((a, b) => a - b)
+}
+
+function shouldPairAtLevel(nextLevel: number, seed: number): boolean {
+  const rule = getRuleForLevel(nextLevel)
+  const blockIndex = Math.floor((nextLevel - 1) / rule.blockSize)
+  const pairLevels = getPairLevelsForBlock(seed, blockIndex, rule)
+  return pairLevels.includes(nextLevel)
+}
+
+function getCurrentStreak(sequence: number[], cell: number): number {
+  let streak = 0
+
+  for (let i = sequence.length - 1; i >= 0; i--) {
+    if (sequence[i] !== cell) break
+    streak += 1
+  }
+
+  return streak
+}
+
+function getStraightAscendingRun(sequence: number[], nextCell: number): number {
+  if (sequence.length === 0) return 1
+
+  const candidate = [...sequence, nextCell]
+  let run = 1
+
+  for (let i = candidate.length - 1; i > 0; i--) {
+    if (candidate[i] !== candidate[i - 1] + 1) break
+    run += 1
+  }
+
+  return run
+}
+
+function getStraightDescendingRun(sequence: number[], nextCell: number): number {
+  if (sequence.length === 0) return 1
+
+  const candidate = [...sequence, nextCell]
+  let run = 1
+
+  for (let i = candidate.length - 1; i > 0; i--) {
+    if (candidate[i] !== candidate[i - 1] - 1) break
+    run += 1
+  }
+
+  return run
+}
+
+function wouldCreateLocalCluster(sequence: number[], nextCell: number, rule: LevelRule): boolean {
+  if (sequence.length + 1 < rule.localClusterWindow) return false
+
+  const candidate = [...sequence, nextCell]
+  const tail = candidate.slice(candidate.length - rule.localClusterWindow)
+  const min = Math.min(...tail)
+  const max = Math.max(...tail)
+
+  return max - min <= rule.maxLocalClusterSpan
+}
+
+function wouldCreateNaturalOrder(sequence: number[], nextCell: number, gridSize: number): boolean {
+  if (sequence.length + 1 < gridSize) return false
+
+  const candidate = [...sequence, nextCell]
+  const tail = candidate.slice(candidate.length - gridSize)
+
+  return tail.every((cell, index) => cell === index)
+}
+
+function countAdjacentPairsInRange(sequence: number[], start: number, end: number): number {
+  let count = 0
+
+  for (let i = Math.max(start + 1, 1); i <= end && i < sequence.length; i++) {
+    if (sequence[i] === sequence[i - 1]) count += 1
+  }
+
+  return count
+}
+
+function hasNearbyPair(sequence: number[], nextIndex: number, minGap: number): boolean {
+  for (let i = Math.max(1, nextIndex - minGap); i < nextIndex; i++) {
+    if (sequence[i] === sequence[i - 1]) return true
+  }
+
+  return false
+}
+
+function chooseDifferentCell(sequence: number[], gridSize: number, rule: LevelRule): number {
+  const lastCell = sequence[sequence.length - 1]
+  const candidates = shuffleNumbers(Array.from({ length: gridSize }, (_, i) => i)).filter((cell) => {
+    if (sequence.length > 0 && cell === lastCell) return false
+    if (getCurrentStreak(sequence, cell) + 1 > rule.maxSameCellStreak) return false
+    if (getStraightAscendingRun(sequence, cell) > rule.maxStraightRun) return false
+    if (getStraightDescendingRun(sequence, cell) > rule.maxStraightRun) return false
+    if (wouldCreateNaturalOrder(sequence, cell, gridSize)) return false
+    if (wouldCreateLocalCluster(sequence, cell, rule)) return false
+    return true
+  })
+
+  if (candidates.length > 0) return candidates[0]
+
+  return randomInt(gridSize)
+}
+
+function appendFairCell(sequence: number[], nextLevel: number, gridSize: number, seed: number): number[] {
+  const rule = getRuleForLevel(nextLevel)
+  const lastCell = sequence[sequence.length - 1]
+  const canRepeatLast =
+    sequence.length > 0 && getCurrentStreak(sequence, lastCell) + 1 <= rule.maxSameCellStreak
+  const pairLevel = shouldPairAtLevel(nextLevel, seed)
+
+  if (pairLevel && canRepeatLast && !wouldCreateLocalCluster(sequence, lastCell, rule)) {
+    return [...sequence, lastCell]
+  }
+
+  return [...sequence, chooseDifferentCell(sequence, gridSize, rule)]
 }
 
 function checkInput(
@@ -80,6 +319,7 @@ function buildGameResult({
   playerId,
   sessionId,
   level,
+  gridSize,
   startedAt,
   endedAt,
   startIso,
@@ -88,11 +328,11 @@ function buildGameResult({
   correctClicks,
   totalClicks,
   reactionTimesMs,
-  speedLevel,
 }: {
   playerId: string
   sessionId: string
   level: number
+  gridSize: number
   startedAt: number
   endedAt: number
   startIso: string
@@ -101,10 +341,10 @@ function buildGameResult({
   correctClicks: number
   totalClicks: number
   reactionTimesMs: number[]
-  speedLevel: number
 }): GameResult {
   const passedLevel = Math.max(level - 1, 0)
   const accuracy = totalClicks > 0 ? Math.round((correctClicks / totalClicks) * 100) : 0
+  const rule = getRuleForLevel(Math.max(level, 1))
 
   return {
     gameId: 'sequence-memory',
@@ -120,12 +360,18 @@ function buildGameResult({
     rawData: {
       finalLevel: passedLevel,
       totalSequence: sequences.length,
-      gridSize: 9,
+      gridSize,
       sequences,
       mistakes,
       correctClicks,
       totalClicks,
-      speedLevel,
+      speedLevel: 1,
+      maxSameCellStreak: rule.maxSameCellStreak,
+      pairsPerBlock: rule.pairsPerBlock,
+      blockSize: rule.blockSize,
+      maxStraightRun: rule.maxStraightRun,
+      localClusterWindow: rule.localClusterWindow,
+      maxLocalClusterSpan: rule.maxLocalClusterSpan,
     },
   }
 }
@@ -133,12 +379,15 @@ function buildGameResult({
 interface GameState {
   phase: GamePhase
   level: number
+  gridSize: GridSize
   sequence: number[]
   playerInput: number[]
   sequences: number[][]
+  seed: number
 }
 
 type Action =
+  | { type: 'SET_GRID_SIZE'; gridSize: GridSize }
   | { type: 'START' }
   | { type: 'BEGIN_INPUT' }
   | { type: 'NEXT_LEVEL' }
@@ -149,21 +398,34 @@ type Action =
 const initial: GameState = {
   phase: 'idle',
   level: 0,
+  gridSize: GAME_CONFIG.defaultGridSize,
   sequence: [],
   playerInput: [],
   sequences: [],
+  seed: 0,
 }
 
 function reducer(state: GameState, action: Action): GameState {
   switch (action.type) {
+    case 'SET_GRID_SIZE':
+      return {
+        ...state,
+        gridSize: action.gridSize,
+      }
+
     case 'START': {
-      const seq = appendRandomCell([])
+      const level = 1
+      const seed = createSeed()
+      const seq = appendFairCell([], level, state.gridSize, seed)
+
       return {
         phase: 'showing',
-        level: 1,
+        level,
+        gridSize: state.gridSize,
         sequence: seq,
         playerInput: [],
         sequences: [],
+        seed,
       }
     }
 
@@ -175,11 +437,13 @@ function reducer(state: GameState, action: Action): GameState {
       }
 
     case 'NEXT_LEVEL': {
-      const seq = appendRandomCell(state.sequence)
+      const nextLevel = state.level + 1
+      const seq = appendFairCell(state.sequence, nextLevel, state.gridSize, state.seed)
+
       return {
         ...state,
         phase: 'showing',
-        level: state.level + 1,
+        level: nextLevel,
         sequence: seq,
         playerInput: [],
         sequences: [...state.sequences, state.sequence],
@@ -199,7 +463,10 @@ function reducer(state: GameState, action: Action): GameState {
       }
 
     case 'RESET':
-      return initial
+      return {
+        ...initial,
+        gridSize: state.gridSize,
+      }
 
     default:
       return state
@@ -208,23 +475,6 @@ function reducer(state: GameState, action: Action): GameState {
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms))
-
-const FLASH_ON = 400
-const FLASH_OFF = 200
-const LEVELS_PER_SPEED_UP = 3
-const SPEED_UP_STEP_ON = 60
-const SPEED_UP_STEP_OFF = 30
-const MIN_FLASH_ON = 160
-const MIN_FLASH_OFF = 80
-
-const getSpeedLevel = (level: number): number =>
-  Math.floor(Math.max(level - 1, 0) / LEVELS_PER_SPEED_UP) + 1
-
-const getFlashOnTime = (speedLevel: number): number =>
-  Math.max(MIN_FLASH_ON, FLASH_ON - (speedLevel - 1) * SPEED_UP_STEP_ON)
-
-const getFlashOffTime = (speedLevel: number): number =>
-  Math.max(MIN_FLASH_OFF, FLASH_OFF - (speedLevel - 1) * SPEED_UP_STEP_OFF)
 
 interface CellProps {
   index: number
@@ -272,34 +522,40 @@ const Cell: React.FC<CellProps> = ({
 }
 
 const Grid: React.FC<{
+  gridSize: GridSize
   litCell: number | null
   failedCell: number | null
   correctCell: number | null
   disabled: boolean
   onCellClick: (i: number) => void
-}> = ({ litCell, failedCell, correctCell, disabled, onCellClick }) => (
-  <div
-    style={{
-      display: 'grid',
-      gridTemplateColumns: 'repeat(3, 1fr)',
-      gap: 10,
-      width: '100%',
-      maxWidth: 360,
-    }}
-  >
-    {Array.from({ length: 9 }, (_, i) => (
-      <Cell
-        key={i}
-        index={i}
-        isLit={litCell === i}
-        isFailed={failedCell === i}
-        isCorrect={correctCell === i}
-        disabled={disabled}
-        onClick={onCellClick}
-      />
-    ))}
-  </div>
-)
+}> = ({ gridSize, litCell, failedCell, correctCell, disabled, onCellClick }) => {
+  const columns = getGridColumns(gridSize)
+  const maxWidth = gridSize === 9 ? 360 : gridSize === 16 ? 420 : 470
+
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: `repeat(${columns}, 1fr)`,
+        gap: gridSize === 25 ? 8 : 10,
+        width: '100%',
+        maxWidth,
+      }}
+    >
+      {Array.from({ length: gridSize }, (_, i) => (
+        <Cell
+          key={i}
+          index={i}
+          isLit={litCell === i}
+          isFailed={failedCell === i}
+          isCorrect={correctCell === i}
+          disabled={disabled}
+          onClick={onCellClick}
+        />
+      ))}
+    </div>
+  )
+}
 
 const SquareIcon: React.FC = () => (
   <div
@@ -358,6 +614,27 @@ const btnGhost: React.CSSProperties = {
   border: '1.5px solid rgba(255,255,255,0.35)',
 }
 
+const optionWrap: React.CSSProperties = {
+  display: 'flex',
+  gap: 14,
+  flexWrap: 'wrap',
+  justifyContent: 'center',
+}
+
+const getGridButtonStyle = (active: boolean): React.CSSProperties => ({
+  border: active ? '3px solid #ffffff' : '2px solid rgba(255,255,255,0.45)',
+  background: active ? '#ffffff' : 'rgba(255,255,255,0.14)',
+  color: active ? '#5fae6d' : 'white',
+  borderRadius: 14,
+  padding: '18px 30px',
+  minWidth: 116,
+  fontSize: 20,
+  fontWeight: 700,
+  cursor: 'pointer',
+  fontFamily: FONT,
+  boxShadow: active ? '0 10px 22px rgba(255,255,255,0.22)' : 'none',
+})
+
 export default function SequenceMemory({
   playerId = 'test-player',
   sessionId = 'test-session',
@@ -374,6 +651,7 @@ export default function SequenceMemory({
   const inputRef = useRef<number[]>([])
   const seqRef = useRef<number[]>([])
   const seqsRef = useRef<number[][]>([])
+  const gridSizeRef = useRef<GridSize>(GAME_CONFIG.defaultGridSize)
 
   const inputStartRef = useRef<number>(0)
   const mistakesRef = useRef<number>(0)
@@ -392,6 +670,10 @@ export default function SequenceMemory({
   useEffect(() => {
     seqsRef.current = state.sequences
   }, [state.sequences])
+
+  useEffect(() => {
+    gridSizeRef.current = state.gridSize
+  }, [state.gridSize])
 
   const handleStart = () => {
     startPerfRef.current = performance.now()
@@ -415,28 +697,24 @@ export default function SequenceMemory({
     let cancelled = false
 
     const play = async () => {
-      const speedLevel = getSpeedLevel(state.level)
-      const flashOnTime = getFlashOnTime(speedLevel)
-      const flashOffTime = getFlashOffTime(speedLevel)
-
-      await sleep(600)
+      await sleep(GAME_CONFIG.beforeShowMs)
 
       for (let i = 0; i < state.sequence.length; i++) {
         if (cancelled) return
 
         setLit(state.sequence[i])
-        await sleep(flashOnTime)
+        await sleep(GAME_CONFIG.flashOnMs)
 
         if (cancelled) return
 
         setLit(null)
 
         if (i < state.sequence.length - 1) {
-          await sleep(flashOffTime)
+          await sleep(GAME_CONFIG.flashOffMs)
         }
       }
 
-      await sleep(400)
+      await sleep(GAME_CONFIG.afterShowMs)
 
       if (!cancelled) {
         inputStartRef.current = performance.now()
@@ -478,6 +756,7 @@ export default function SequenceMemory({
             playerId,
             sessionId,
             level: state.level,
+            gridSize: gridSizeRef.current,
             startedAt: startPerfRef.current,
             endedAt: performance.now(),
             startIso: startIsoRef.current,
@@ -486,7 +765,6 @@ export default function SequenceMemory({
             correctClicks: correctClicksRef.current,
             totalClicks: totalClicksRef.current,
             reactionTimesMs: reactionTimesRef.current,
-            speedLevel: getSpeedLevel(state.level),
           })
 
           onGameComplete(gameResult)
@@ -503,7 +781,7 @@ export default function SequenceMemory({
       dispatch({ type: 'PLAYER_PRESS', cell: cellIndex })
 
       if (result === 'complete') {
-        setTimeout(() => dispatch({ type: 'NEXT_LEVEL' }), 800)
+        setTimeout(() => dispatch({ type: 'NEXT_LEVEL' }), GAME_CONFIG.nextLevelDelayMs)
       }
     },
     [state.phase, state.level, playerId, sessionId, onGameComplete]
@@ -524,6 +802,25 @@ export default function SequenceMemory({
           Sequence Memory Test
         </h1>
         <p style={{ fontSize: 16, opacity: 0.85 }}>Memorize the pattern.</p>
+
+        <div style={{ textAlign: 'center' }}>
+          <p style={{ margin: '0 0 10px', fontSize: 15, opacity: 0.85 }}>
+            Select grid size
+          </p>
+          <div style={optionWrap}>
+            {GRID_OPTIONS.map((size) => (
+              <button
+                key={size}
+                type="button"
+                style={getGridButtonStyle(state.gridSize === size)}
+                onClick={() => dispatch({ type: 'SET_GRID_SIZE', gridSize: size })}
+              >
+                {getGridColumns(size)} x {getGridColumns(size)}
+              </button>
+            ))}
+          </div>
+        </div>
+
         <button style={btnYellow} onClick={handleStart}>
           Start
         </button>
@@ -546,11 +843,11 @@ export default function SequenceMemory({
             fontSize: 15,
             opacity: 0.75,
             textAlign: 'center',
-            maxWidth: 280,
+            maxWidth: 300,
           }}
         >
-          Passed <strong>{passed}</strong> level{passed === 1 ? '' : 's'} &nbsp;|&nbsp; Score:{' '}
-          <strong>{passed * 10}</strong>
+          Grid <strong>{getGridColumns(state.gridSize)} x {getGridColumns(state.gridSize)}</strong>
+          &nbsp;|&nbsp; Score: <strong>{passed * 10}</strong>
         </p>
         <button style={btnYellow} onClick={handleStart}>
           Try again
@@ -567,6 +864,7 @@ export default function SequenceMemory({
     state.phase === 'showing'
       ? 'Watch the pattern...'
       : `Repeat the pattern — ${remaining} left`
+
   return (
     <div style={wrap}>
       <div style={{ fontSize: 20, fontWeight: 500, letterSpacing: 1 }}>
@@ -577,6 +875,7 @@ export default function SequenceMemory({
       </div>
 
       <Grid
+        gridSize={state.gridSize}
         litCell={litCell}
         failedCell={failedCell}
         correctCell={correctCell}
