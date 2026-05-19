@@ -16,6 +16,8 @@ type LevelRule = {
   pairStartOffset: number
   localClusterWindow: number
   maxLocalClusterSpan: number
+  rowGapEveryLevels: number
+  minRowGap: number
 }
 
 type SequenceConfig = {
@@ -49,6 +51,8 @@ const GAME_CONFIG: SequenceConfig = {
       pairStartOffset: 4,
       localClusterWindow: 4,
       maxLocalClusterSpan: 2,
+      rowGapEveryLevels: 2,
+      minRowGap: 1,
     },
     {
       fromLevel: 11,
@@ -60,6 +64,8 @@ const GAME_CONFIG: SequenceConfig = {
       pairStartOffset: 4,
       localClusterWindow: 4,
       maxLocalClusterSpan: 2,
+      rowGapEveryLevels: 2,
+      minRowGap: 1,
     },
   ],
 }
@@ -90,6 +96,8 @@ interface GameResult {
     maxStraightRun: number
     localClusterWindow: number
     maxLocalClusterSpan: number
+    rowGapEveryLevels: number
+    minRowGap: number
   }
 }
 
@@ -266,10 +274,31 @@ function hasNearbyPair(sequence: number[], nextIndex: number, minGap: number): b
   return false
 }
 
-function chooseDifferentCell(sequence: number[], gridSize: number, rule: LevelRule): number {
+function getCellRow(cell: number, gridSize: number): number {
+  const columns = getGridColumns(gridSize)
+  return Math.floor(cell / columns)
+}
+
+function hasEnoughRowGap(previousCell: number, nextCell: number, gridSize: number, minRowGap: number): boolean {
+  return Math.abs(getCellRow(previousCell, gridSize) - getCellRow(nextCell, gridSize)) >= minRowGap
+}
+
+function shouldUseRowGapRule(nextLevel: number, rule: LevelRule): boolean {
+  return rule.rowGapEveryLevels > 0 && nextLevel % rule.rowGapEveryLevels === 0
+}
+
+function chooseDifferentCell(
+  sequence: number[],
+  nextLevel: number,
+  gridSize: number,
+  rule: LevelRule
+): number {
   const lastCell = sequence[sequence.length - 1]
+  const mustKeepRowGap = sequence.length > 0 && shouldUseRowGapRule(nextLevel, rule)
+
   const candidates = shuffleNumbers(Array.from({ length: gridSize }, (_, i) => i)).filter((cell) => {
     if (sequence.length > 0 && cell === lastCell) return false
+    if (mustKeepRowGap && !hasEnoughRowGap(lastCell, cell, gridSize, rule.minRowGap)) return false
     if (getCurrentStreak(sequence, cell) + 1 > rule.maxSameCellStreak) return false
     if (getStraightAscendingRun(sequence, cell) > rule.maxStraightRun) return false
     if (getStraightDescendingRun(sequence, cell) > rule.maxStraightRun) return false
@@ -279,6 +308,14 @@ function chooseDifferentCell(sequence: number[], gridSize: number, rule: LevelRu
   })
 
   if (candidates.length > 0) return candidates[0]
+
+  const rowGapCandidates = shuffleNumbers(Array.from({ length: gridSize }, (_, i) => i)).filter((cell) => {
+    if (sequence.length > 0 && cell === lastCell) return false
+    if (mustKeepRowGap && !hasEnoughRowGap(lastCell, cell, gridSize, rule.minRowGap)) return false
+    return true
+  })
+
+  if (rowGapCandidates.length > 0) return rowGapCandidates[0]
 
   return randomInt(gridSize)
 }
@@ -290,11 +327,13 @@ function appendFairCell(sequence: number[], nextLevel: number, gridSize: number,
     sequence.length > 0 && getCurrentStreak(sequence, lastCell) + 1 <= rule.maxSameCellStreak
   const pairLevel = shouldPairAtLevel(nextLevel, seed)
 
-  if (pairLevel && canRepeatLast && !wouldCreateLocalCluster(sequence, lastCell, rule)) {
+  const mustKeepRowGap = sequence.length > 0 && shouldUseRowGapRule(nextLevel, rule)
+
+  if (pairLevel && !mustKeepRowGap && canRepeatLast && !wouldCreateLocalCluster(sequence, lastCell, rule)) {
     return [...sequence, lastCell]
   }
 
-  return [...sequence, chooseDifferentCell(sequence, gridSize, rule)]
+  return [...sequence, chooseDifferentCell(sequence, nextLevel, gridSize, rule)]
 }
 
 function checkInput(
@@ -372,6 +411,8 @@ function buildGameResult({
       maxStraightRun: rule.maxStraightRun,
       localClusterWindow: rule.localClusterWindow,
       maxLocalClusterSpan: rule.maxLocalClusterSpan,
+      rowGapEveryLevels: rule.rowGapEveryLevels,
+      minRowGap: rule.minRowGap,
     },
   }
 }
