@@ -98,6 +98,9 @@ interface GameResult {
     maxLocalClusterSpan: number
     rowGapEveryLevels: number
     minRowGap: number
+    fairnessScore: number
+    frequencyMap: Record<number, number>
+    fairnessRules: string[]
   }
 }
 
@@ -236,6 +239,27 @@ function getStraightDescendingRun(sequence: number[], nextCell: number): number 
   return run
 }
 
+function getStraightVerticalRun(sequence: number[], nextCell: number, gridSize: number): number {
+  if (sequence.length === 0) return 1
+
+  const columns = getGridColumns(gridSize)
+  const candidate = [...sequence, nextCell]
+  let run = 1
+
+  for (let i = candidate.length - 1; i > 0; i--) {
+    const current = candidate[i]
+    const previous = candidate[i - 1]
+    const sameColumn = current % columns === previous % columns
+    const nextRowDown = current === previous + columns
+    const nextRowUp = current === previous - columns
+
+    if (!sameColumn || (!nextRowDown && !nextRowUp)) break
+    run += 1
+  }
+
+  return run
+}
+
 function wouldCreateLocalCluster(sequence: number[], nextCell: number, rule: LevelRule): boolean {
   if (sequence.length + 1 < rule.localClusterWindow) return false
 
@@ -256,22 +280,51 @@ function wouldCreateNaturalOrder(sequence: number[], nextCell: number, gridSize:
   return tail.every((cell, index) => cell === index)
 }
 
-function countAdjacentPairsInRange(sequence: number[], start: number, end: number): number {
-  let count = 0
 
-  for (let i = Math.max(start + 1, 1); i <= end && i < sequence.length; i++) {
-    if (sequence[i] === sequence[i - 1]) count += 1
+
+function buildFrequencyMap(sequence: number[], gridSize: number): Record<number, number> {
+  const frequencyMap: Record<number, number> = {}
+
+  for (let i = 0; i < gridSize; i++) {
+    frequencyMap[i] = 0
   }
 
-  return count
+  for (const cell of sequence) {
+    frequencyMap[cell] = (frequencyMap[cell] ?? 0) + 1
+  }
+
+  return frequencyMap
 }
 
-function hasNearbyPair(sequence: number[], nextIndex: number, minGap: number): boolean {
-  for (let i = Math.max(1, nextIndex - minGap); i < nextIndex; i++) {
-    if (sequence[i] === sequence[i - 1]) return true
-  }
+function getMaxWindowFrequency(sequence: number[], cell: number, windowSize: number): number {
+  const tail = [...sequence, cell].slice(-windowSize)
+  return tail.filter((item) => item === cell).length
+}
 
-  return false
+function wouldBreakBalancedWindow(sequence: number[], cell: number, windowSize = 5, maxCount = 2): boolean {
+  if (sequence.length + 1 < windowSize) return false
+  return getMaxWindowFrequency(sequence, cell, windowSize) > maxCount
+}
+
+function calculateFairnessScore(sequence: number[], gridSize: number): number {
+  if (sequence.length === 0) return 100
+
+  const frequencyMap = buildFrequencyMap(sequence, gridSize)
+  const values = Object.values(frequencyMap)
+  const expected = sequence.length / gridSize
+  const totalDeviation = values.reduce((sum, value) => sum + Math.abs(value - expected), 0)
+  const maxDeviation = sequence.length * 2
+  const score = 100 - (totalDeviation / maxDeviation) * 100
+
+  return Math.max(0, Math.min(100, Math.round(score)))
+}
+
+function getLeastUsedCandidates(candidates: number[], sequence: number[], gridSize: number): number[] {
+  const frequencyMap = buildFrequencyMap(sequence, gridSize)
+  const minFrequency = Math.min(...candidates.map((cell) => frequencyMap[cell] ?? 0))
+  const allowedFrequency = minFrequency + 1
+
+  return candidates.filter((cell) => (frequencyMap[cell] ?? 0) <= allowedFrequency)
 }
 
 function getCellRow(cell: number, gridSize: number): number {
@@ -302,12 +355,17 @@ function chooseDifferentCell(
     if (getCurrentStreak(sequence, cell) + 1 > rule.maxSameCellStreak) return false
     if (getStraightAscendingRun(sequence, cell) > rule.maxStraightRun) return false
     if (getStraightDescendingRun(sequence, cell) > rule.maxStraightRun) return false
+    if (getStraightVerticalRun(sequence, cell, gridSize) > rule.maxStraightRun) return false
     if (wouldCreateNaturalOrder(sequence, cell, gridSize)) return false
     if (wouldCreateLocalCluster(sequence, cell, rule)) return false
+    if (wouldBreakBalancedWindow(sequence, cell)) return false
     return true
   })
 
-  if (candidates.length > 0) return candidates[0]
+  if (candidates.length > 0) {
+    const fairCandidates = getLeastUsedCandidates(candidates, sequence, gridSize)
+    return fairCandidates[0] ?? candidates[0]
+  }
 
   const rowGapCandidates = shuffleNumbers(Array.from({ length: gridSize }, (_, i) => i)).filter((cell) => {
     if (sequence.length > 0 && cell === lastCell) return false
@@ -329,7 +387,13 @@ function appendFairCell(sequence: number[], nextLevel: number, gridSize: number,
 
   const mustKeepRowGap = sequence.length > 0 && shouldUseRowGapRule(nextLevel, rule)
 
-  if (pairLevel && !mustKeepRowGap && canRepeatLast && !wouldCreateLocalCluster(sequence, lastCell, rule)) {
+  if (
+    pairLevel &&
+    !mustKeepRowGap &&
+    canRepeatLast &&
+    !wouldCreateLocalCluster(sequence, lastCell, rule) &&
+    !wouldBreakBalancedWindow(sequence, lastCell)
+  ) {
     return [...sequence, lastCell]
   }
 
@@ -413,6 +477,15 @@ function buildGameResult({
       maxLocalClusterSpan: rule.maxLocalClusterSpan,
       rowGapEveryLevels: rule.rowGapEveryLevels,
       minRowGap: rule.minRowGap,
+      fairnessScore: calculateFairnessScore(sequences[sequences.length - 1] ?? [], gridSize),
+      frequencyMap: buildFrequencyMap(sequences[sequences.length - 1] ?? [], gridSize),
+      fairnessRules: [
+        'Anti-streak: cell เดิมซ้ำติดกันได้ไม่เกิน 2 ครั้ง',
+        'Balanced window: 5 step ล่าสุด cell เดียวกันมีได้ไม่เกิน 2 ครั้ง',
+        'Anti-bias shuffle: cell ที่ถูกใช้น้อยกว่าจะมีโอกาสถูกเลือกก่อน',
+        'Anti-vertical: กันลำดับแนวตั้งตรงคอลัมน์ เช่น 1-4-7',
+        'Row gap: ทุก 2 level บังคับกระโดดข้าม row',
+      ],
     },
   }
 }
@@ -675,6 +748,7 @@ const getGridButtonStyle = (active: boolean): React.CSSProperties => ({
   fontFamily: FONT,
   boxShadow: active ? '0 10px 22px rgba(255,255,255,0.22)' : 'none',
 })
+
 
 export default function SequenceMemory({
   playerId = 'test-player',
